@@ -1,100 +1,98 @@
-# {{cookiecutter.project_name}}
+This repository contains notebooks & instructions for setting up the demo of development workflow & CI/CD (on Azure DevOps) using the Databricks notebooks and [Repos feature](https://docs.databricks.com/repos.html).  Testing of notebooks is done using the [Nutter library](https://github.com/microsoft/nutter) developed by Microsoft.  The "main" code is in the notebooks `Code1.py` and `Code2.py`, and the testing code is in the `test_code1_code2.py`.
 
-This is a sample project for Databricks, generated via cookiecutter.
+This demo shows how you can use Repos to work on your own copy of notebooks, test them after commit in the "staging" environment, and promote to "production" on successful testing of `releases` branch.
 
-While using this project, you need Python 3.X and `pip` or `conda` for package management.
+# The workflow
 
-## Installing project requirements
+The development workflow is organized as on following image:
 
-```bash
-pip install -r unit-requirements.txt
+![Development workflow](images/cicd-workflow.png)
+
+1. Developer works on the code in the separate environment (personal space on Databricks, etc.).  When code changes are done, they are committed into some branch
+1. CI/CD implementation (Azure DevOps here) picks up the changes, and tests them in a staging environment (executes the "build pipeline").  This consists of several steps (see [azure-pipelines.yml](azure-pipelines.yml) for technical details):
+   * Update repository checkout in the "Staging" folder
+   * Execute tests with updated code
+   * Publish tests results
+1. In current setup, there are different jobs for the "normal" branches, and for "release" branch (`releases` in this setup), this would allow to run different sets of tests when we're preparing the release
+1. If commit is done to the "release branch, and there are no test failures, then the "release pipeline" is triggered, and it updates the production environment by updating the repository checkout in the "Production" folder.
+
+
+# Setup on Databricks side
+
+Your Databricks workspace needs to have Repos functionality enabled.  If it's enabled, you should see the "Repos" icon in the navigation panel:
+
+* Fork repository into your environment - Github, or Azure DevOps (follow Databricks documentation on using it)
+* In the Repos, click "Create Repo" and link it to the Git repository that you've forked - this will be your personal copy of the code that will be used for work:
+
+![Create a personal repo](images/create-personal-project.png)
+
+* Create the staging & production checkouts
+  * In the Repos, in the top-level part, click on the "ᐯ" near the "Repos" header, select "Create" and select "Folder" (see image).  Give it the name "Staging":
+
+![Create a staging folder](images/create-staging-folder.png)
+
+  * Click on the  "ᐯ" near the "Staging" folder, and click "Create" and select "Repo":
+
+![Create a staging repository](images/create-project-in-staging.png)
+
+  * Link it to the Git repository, similarly how you did it for your personal checkout
+  * Create the "Production" folder with repository inside, repeating two previous steps
+* Create a new cluster that will be used for execution of the tests, you will need to pass the [cluster ID](https://docs.databricks.com/workspace/workspace-details.html#cluster-url-and-id) to the Nutter to execute the tests
+
+
+# Setup Azure DevOps pipelines
+
+The Azure DevOps setup consists of the several steps, described in the next sections.  It's assumed that project in Azure DevOps already exists.
+
+We need to create a [personal access token (PAT)](https://docs.databricks.com/administration-guide/access-control/tokens.html) that will be used for execution of the tests & updating the repository.  This token will be used to authenticate to Databricks workspace, and then it will fetch configured token to authenticate to Git provider.  We also need to connect Databricks workspace to the Git provider - usually it's done by using the provider-specific access tokens - see [documentation](https://docs.databricks.com/repos.html#configure-your-git-integration-with-databricks) on details of setting the integration with specific Git provider (**note, that when repository is on Azure DevOps, you still need to generate Azure DevOps token to make API working**!, and also provide the user name in the Git settings). 
+
+> :warning: the previous instructions on using Repos + Azure DevOps with service principals weren't correct, so were removed!
+
+### Create variables group to keep common configuration
+
+Because we have several pipelines, the it's makes sense to define [variable group](https://docs.microsoft.com/en-us/azure/devops/pipelines/library/variable-groups) to store the data that are necessary for execution of tests & deployment of the code.  We need following configuration properties for execution of our pipelines:
+
+* `databricks_host` - the [URL of your workspace](https://docs.databricks.com/workspace/workspace-details.html#workspace-instance-names-urls-and-ids) where tests will be executed (host name with `https://`, without `?o=`, and without trailing slash character.  For example: `https://adb-1568830229861029.9.azuredatabricks.net`).
+* `databricks_token` - personal access token for executing commands against the workspace.  Mark this variable as private!  Note that if you're using Azure DevOps to host repository, then you need to use AAD token instead (see instructions below).
+* `cluster_id` - the ID of the cluster where tests will be executed.
+
+The name of the variable group is used in the [azure-pipelines.yml](azure-pipelines.yml). By default its name is "Nutter Testing".  Change the [azure-pipelines.yml](azure-pipelines.yml) if you use another name for variable group.
+
+### Create the build pipeline
+
+Azure DevOps can work with GitHub repositories as well - see [documentation](https://docs.microsoft.com/en-us/azure/devops/pipelines/repos/github) for more details on how to link DevOps with GitHub.
+
+* In the Azure DevOps, in the Pipelines section, select Pipelines, and click "New pipeline"
+* Select GitHub and repository
+* In the "Configure" step select the "Existing Azure Pipelines YAML file" and specify the name of the existing file: [azure-pipelines.yml](azure-pipelines.yml)
+* Save pipeline
+
+
+### Create the release pipeline
+
+* In the Azure DevOps, in the Pipelines section, select Releases, and click "New release pipeline"
+* Select "Empty Job" in the dialog
+* In the Stage dialog enter some meaningful name for it
+* In the "Variables" tab, link the variable group that was created previously
+* Configure job & task:
+  * Configure agent - in the "Agent Specification" select "ubuntu-18.04"
+  * Click on "+" and find the "Command line" task
+  * Enter following code that will connect to the production environment & update the checkout of the repository (via [Repos REST API](https://docs.databricks.com/dev-tools/api/latest/repos.html)):
+
+```sh
+python -m pip install --upgrade databricks-cli
+databricks repos update --path /Repos/Production/databricks-nutter-projects-demo --branch releases
 ```
 
-## Install project package in a developer mode
+  * Below the code, add environment variable `DATABRICKS_TOKEN` with value `$(DATABRICKS_TOKEN)` - this will pull it from the variable group into the script's execution context
+  * Save task & job
+* We also need to configure an artifact:
+  * Click on "Add artifact", select project, and source (the name of the build pipeline). Also, for "Default version" select "Latest from specific branch with tags" and select the "releases" branch.  Click on "Add" to add artifact into pipeline
+  * Click on the "⚡" icon to configure the continuous deployment (by default, release is triggered manually).  Add branch filter and also select the `releases` branch
+* Your release pipeline should look as following:
 
-```bash
-pip install -e .
-```
+![Release pipeline](images/release-pipeline.png)
 
-## Testing
+* Save the pipeline
 
-For local unit testing, please use `pytest`:
-```
-pytest tests/unit --cov
-```
-
-For an integration test on interactive cluster, use the following command:
-```
-dbx execute --cluster-name=<name of interactive cluster> --job={{cookiecutter.project_name}}-sample-integration-test
-```
-
-For a test on an automated job cluster, deploy the job files and then launch:
-```
-dbx deploy --jobs={{cookiecutter.project_name}}-sample-integration-test --files-only
-dbx launch --job={{cookiecutter.project_name}}-sample-integration-test --as-run-submit --trace
-```
-
-## Interactive execution and development
-
-1. `dbx` expects that cluster for interactive execution supports `%pip` and `%conda` magic [commands](https://docs.databricks.com/libraries/notebooks-python-libraries.html).
-2. Please configure your job in `conf/deployment.json` file. 
-2. To execute the code interactively, provide either `--cluster-id` or `--cluster-name`.
-```bash
-dbx execute \
-    --cluster-name="<some-cluster-name>" \
-    --job=job-name
-```
-
-Multiple users also can use the same cluster for development. Libraries will be isolated per each execution context.
-
-## Preparing deployment file
-
-Next step would be to configure your deployment objects. To make this process easy and flexible, we're using JSON for configuration.
-
-By default, deployment configuration is stored in `conf/deployment.json`.
-
-## Deployment for Run Submit API
-
-To deploy only the files and not to override the job definitions, do the following:
-
-```bash
-dbx deploy --files-only
-```
-
-To launch the file-based deployment:
-```
-dbx launch --as-run-submit --trace
-```
-
-This type of deployment is handy for working in different branches, not to affect the main job definition.
-
-## Deployment for Run Now API
-
-To deploy files and update the job definitions:
-
-```bash
-dbx deploy
-```
-
-To launch the file-based deployment:
-```
-dbx launch --job=<job-name>
-```
-
-This type of deployment shall be mainly used from the CI pipeline in automated way during new release.
-
-
-## CICD pipeline settings
-
-Please set the following secrets or environment variables for your CI provider:
-- `DATABRICKS_HOST`
-- `DATABRICKS_TOKEN`
-
-## Testing and releasing via CI pipeline
-
-- To trigger the CI pipeline, simply push your code to the repository. If CI provider is correctly set, it shall trigger the general testing pipeline
-- To trigger the release pipeline, get the current version from the `{{cookiecutter.project_slug}}/__init__.py` file and tag the current code version:
-```
-git tag -a v<your-project-version> -m "Release tag for version <your-project-version>"
-git push origin --tags
-```
+After all of this done, the release pipeline will be automatically executed on every successful build in the `releases` branch.
