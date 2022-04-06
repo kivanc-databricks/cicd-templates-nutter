@@ -143,7 +143,7 @@ stages:
         env:
           DATABRICKS_HOST: $(DATABRICKS_HOST)
           DATABRICKS_TOKEN: $(DATABRICKS_TOKEN)
-        displayName: 'Update Staging repository'
+        displayName: 'Update Production repository'
 
 # We can do a separate set of the tests for release branches
       - script: |
